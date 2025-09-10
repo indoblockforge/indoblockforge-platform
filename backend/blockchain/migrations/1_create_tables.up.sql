@@ -6,6 +6,7 @@ CREATE TABLE networks (
   rpc_url TEXT NOT NULL,
   explorer_url TEXT,
   native_currency VARCHAR(10) NOT NULL,
+  description TEXT,
   is_active BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -20,10 +21,10 @@ CREATE TABLE smart_contracts (
   abi TEXT NOT NULL,
   bytecode TEXT,
   version VARCHAR(50) NOT NULL DEFAULT '1.0.0',
-  contract_type VARCHAR(50) NOT NULL, -- 'ERC20', 'ERC721', 'ERC1155', 'CUSTOM'
+  contract_type VARCHAR(50) NOT NULL, -- could be ENUM if DB supports
   is_verified BOOLEAN NOT NULL DEFAULT false,
   deployed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  deployed_by VARCHAR(42),
+  deployed_by VARCHAR(255), -- refactor: match user_id type
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   UNIQUE(address, network_id)
 );
@@ -33,13 +34,16 @@ CREATE TABLE wallets (
   id BIGSERIAL PRIMARY KEY,
   address VARCHAR(42) NOT NULL UNIQUE,
   user_id VARCHAR(255) NOT NULL,
-  wallet_type VARCHAR(20) NOT NULL DEFAULT 'EOA', -- 'EOA', 'MULTISIG', 'CONTRACT'
+  wallet_type VARCHAR(20) NOT NULL DEFAULT 'EOA',
   is_custodial BOOLEAN NOT NULL DEFAULT false,
-  encrypted_private_key TEXT, -- Only for custodial wallets
+  encrypted_private_key TEXT,
   public_key TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  last_used_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  last_used_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  CHECK (is_custodial OR encrypted_private_key IS NULL)
 );
+
+CREATE INDEX idx_wallets_user_id ON wallets(user_id);
 
 -- Tokens table for managing all tokens
 CREATE TABLE tokens (
@@ -50,13 +54,15 @@ CREATE TABLE tokens (
   decimals INTEGER NOT NULL DEFAULT 18,
   total_supply DECIMAL(78, 0),
   max_supply DECIMAL(78, 0),
-  token_type VARCHAR(20) NOT NULL, -- 'ERC20', 'ERC721', 'ERC1155'
+  token_type VARCHAR(20) NOT NULL,
   metadata_uri TEXT,
   is_mintable BOOLEAN NOT NULL DEFAULT true,
   is_burnable BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   UNIQUE(contract_id, symbol)
 );
+
+CREATE INDEX idx_tokens_symbol ON tokens(symbol);
 
 -- Token balances table
 CREATE TABLE token_balances (
@@ -68,7 +74,12 @@ CREATE TABLE token_balances (
   UNIQUE(wallet_id, token_id)
 );
 
+CREATE INDEX idx_token_balances_wallet_id ON token_balances(wallet_id);
+
 -- Transactions table for tracking all blockchain transactions
+CREATE TYPE transaction_status AS ENUM ('pending', 'confirmed', 'failed');
+CREATE TYPE transaction_type AS ENUM ('transfer', 'contract_call', 'contract_deploy');
+
 CREATE TABLE transactions (
   id BIGSERIAL PRIMARY KEY,
   hash VARCHAR(66) NOT NULL UNIQUE,
@@ -83,26 +94,28 @@ CREATE TABLE transactions (
   block_number BIGINT,
   block_hash VARCHAR(66),
   transaction_index INTEGER,
-  status VARCHAR(20) NOT NULL DEFAULT 'pending', -- 'pending', 'confirmed', 'failed'
-  transaction_type VARCHAR(50) NOT NULL, -- 'transfer', 'contract_call', 'contract_deploy'
+  status transaction_status NOT NULL DEFAULT 'pending',
+  transaction_type transaction_type NOT NULL,
   contract_address VARCHAR(42),
-  logs TEXT, -- JSON array of event logs
+  logs JSONB, -- refactor: use JSONB
   error_message TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   confirmed_at TIMESTAMP WITH TIME ZONE
 );
 
+CREATE INDEX idx_transactions_network_id ON transactions(network_id);
+
 -- NFT metadata table for storing NFT-specific data
 CREATE TABLE nft_metadata (
   id BIGSERIAL PRIMARY KEY,
   token_id BIGINT NOT NULL REFERENCES tokens(id),
-  token_number DECIMAL(78, 0) NOT NULL, -- The actual NFT token ID on chain
+  token_number DECIMAL(78, 0) NOT NULL,
   name VARCHAR(255),
   description TEXT,
   image_url TEXT,
   animation_url TEXT,
   external_url TEXT,
-  attributes TEXT, -- JSON array of traits/attributes
+  attributes JSONB, -- refactor: use JSONB
   owner_address VARCHAR(42),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -115,7 +128,7 @@ CREATE TABLE api_keys (
   key_hash VARCHAR(64) NOT NULL UNIQUE,
   user_id VARCHAR(255) NOT NULL,
   name VARCHAR(255) NOT NULL,
-  permissions TEXT NOT NULL, -- JSON array of permissions
+  permissions JSONB NOT NULL, -- refactor: use JSONB
   rate_limit_per_minute INTEGER NOT NULL DEFAULT 100,
   is_active BOOLEAN NOT NULL DEFAULT true,
   last_used_at TIMESTAMP WITH TIME ZONE,
@@ -123,13 +136,15 @@ CREATE TABLE api_keys (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE INDEX idx_api_keys_user_id ON api_keys(user_id);
+
 -- Events table for blockchain event logging
 CREATE TABLE blockchain_events (
   id BIGSERIAL PRIMARY KEY,
   transaction_hash VARCHAR(66) NOT NULL,
   contract_address VARCHAR(42) NOT NULL,
   event_name VARCHAR(255) NOT NULL,
-  event_data TEXT NOT NULL, -- JSON data
+  event_data JSONB NOT NULL,
   block_number BIGINT NOT NULL,
   log_index INTEGER NOT NULL,
   network_id BIGINT NOT NULL REFERENCES networks(id),
@@ -137,19 +152,24 @@ CREATE TABLE blockchain_events (
 );
 
 -- Marketplace listings for NFT trading
+CREATE TYPE listing_status AS ENUM ('active', 'sold', 'cancelled', 'expired');
 CREATE TABLE marketplace_listings (
   id BIGSERIAL PRIMARY KEY,
   token_id BIGINT NOT NULL REFERENCES tokens(id),
   token_number DECIMAL(78, 0) NOT NULL,
   seller_address VARCHAR(42) NOT NULL,
   price DECIMAL(78, 0) NOT NULL,
-  currency_token_id BIGINT REFERENCES tokens(id), -- NULL for native currency
-  status VARCHAR(20) NOT NULL DEFAULT 'active', -- 'active', 'sold', 'cancelled', 'expired'
+  currency_token_id BIGINT REFERENCES tokens(id),
+  status listing_status NOT NULL DEFAULT 'active',
   expires_at TIMESTAMP WITH TIME ZONE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   sold_at TIMESTAMP WITH TIME ZONE,
   buyer_address VARCHAR(42)
 );
+
+CREATE INDEX idx_marketplace_token_id ON marketplace_listings(token_id);
+CREATE INDEX idx_marketplace_seller ON marketplace_listings(seller_address);
+CREATE INDEX idx_marketplace_status ON marketplace_listings(status);
 
 -- Create indexes for blockchain_events table
 CREATE INDEX idx_events_contract_name ON blockchain_events (contract_address, event_name);
