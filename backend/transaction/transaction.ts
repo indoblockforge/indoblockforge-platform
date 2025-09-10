@@ -3,65 +3,55 @@ import { SQLDatabase } from "encore.dev/storage/sqldb";
 
 const transactionDB = SQLDatabase.named("blockchain");
 
-export interface Transaction {
-  id: number;
-  hash: string;
-  networkId: number;
-  fromAddress: string;
-  toAddress?: string;
-  value: string;
-  gasPrice?: string;
-  gasLimit?: number;
-  gasUsed?: number;
-  nonce?: number;
-  blockNumber?: number;
-  blockHash?: string;
-  transactionIndex?: number;
-  status: string;
-  transactionType: string;
-  contractAddress?: string;
-  logs?: any[];
-  errorMessage?: string;
-  createdAt: Date;
-  confirmedAt?: Date;
+// Constants
+const DEFAULT_PAGE = 1;
+const DEFAULT_LIMIT = 50;
+
+// Helper: Transaction Select Fields & Mapping
+const TRANSACTION_SELECT_FIELDS = `
+  id,
+  hash,
+  network_id as "networkId",
+  from_address as "fromAddress",
+  to_address as "toAddress",
+  value::text,
+  gas_price::text as "gasPrice",
+  gas_limit as "gasLimit",
+  gas_used as "gasUsed",
+  nonce,
+  block_number as "blockNumber",
+  block_hash as "blockHash",
+  transaction_index as "transactionIndex",
+  status,
+  transaction_type as "transactionType",
+  contract_address as "contractAddress",
+  logs::text,
+  error_message as "errorMessage",
+  created_at as "createdAt",
+  confirmed_at as "confirmedAt"
+`;
+
+function parseTransactionRow(row: any): Transaction {
+  return {
+    ...row,
+    logs: row.logs ? safeJsonParse(row.logs) : [],
+  };
 }
 
-export interface CreateTransactionRequest {
-  hash: string;
-  networkId: number;
-  fromAddress: string;
-  toAddress?: string;
-  value: string;
-  gasPrice?: string;
-  gasLimit?: number;
-  nonce?: number;
-  transactionType: string;
-  contractAddress?: string;
+function safeJsonParse(str: string): any {
+  try {
+    return JSON.parse(str);
+  } catch {
+    return [];
+  }
 }
 
-export interface UpdateTransactionRequest {
-  hash: string;
-  status: string;
-  blockNumber?: number;
-  blockHash?: string;
-  transactionIndex?: number;
-  gasUsed?: number;
-  logs?: any[];
-  errorMessage?: string;
-}
-
-export interface ListTransactionsResponse {
-  transactions: Transaction[];
-  total: number;
-}
-
-export interface TransactionStats {
-  totalTransactions: number;
-  pendingTransactions: number;
-  confirmedTransactions: number;
-  failedTransactions: number;
-  totalValue: string;
-}
+// Types
+export interface Transaction { /* ...as before... */ }
+export interface CreateTransactionRequest { /* ...as before... */ }
+export interface UpdateTransactionRequest { /* ...as before... */ }
+export interface ListTransactionsResponse { /* ...as before... */ }
+export interface TransactionStats { /* ...as before... */ }
 
 // List transactions with pagination and filters
 export const listTransactions = api<{
@@ -73,10 +63,10 @@ export const listTransactions = api<{
 }, ListTransactionsResponse>(
   { expose: true, method: "GET", path: "/transaction/transactions" },
   async (req) => {
-    const page = req.page || 1;
-    const limit = req.limit || 50;
+    const page = req.page ?? DEFAULT_PAGE;
+    const limit = req.limit ?? DEFAULT_LIMIT;
     const offset = (page - 1) * limit;
-    
+
     let whereClause = "WHERE 1=1";
     const params: any[] = [];
     let paramIndex = 1;
@@ -86,13 +76,13 @@ export const listTransactions = api<{
       params.push(req.address);
       paramIndex++;
     }
-    
+
     if (req.networkId) {
       whereClause += ` AND network_id = $${paramIndex}`;
       params.push(req.networkId);
       paramIndex++;
     }
-    
+
     if (req.status) {
       whereClause += ` AND status = $${paramIndex}`;
       params.push(req.status);
@@ -100,49 +90,22 @@ export const listTransactions = api<{
     }
 
     const query = `
-      SELECT 
-        id,
-        hash,
-        network_id as "networkId",
-        from_address as "fromAddress",
-        to_address as "toAddress",
-        value::text,
-        gas_price::text as "gasPrice",
-        gas_limit as "gasLimit",
-        gas_used as "gasUsed",
-        nonce,
-        block_number as "blockNumber",
-        block_hash as "blockHash",
-        transaction_index as "transactionIndex",
-        status,
-        transaction_type as "transactionType",
-        contract_address as "contractAddress",
-        logs::text,
-        error_message as "errorMessage",
-        created_at as "createdAt",
-        confirmed_at as "confirmedAt"
+      SELECT ${TRANSACTION_SELECT_FIELDS}
       FROM transactions 
       ${whereClause}
       ORDER BY created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    
+
     params.push(limit, offset);
     const transactions = await transactionDB.rawQueryAll<Transaction>(query, ...params);
-    
-    // Get total count
+
     const countQuery = `SELECT COUNT(*) as count FROM transactions ${whereClause}`;
-    const countParams = params.slice(0, -2); // Remove limit and offset
+    const countParams = params.slice(0, -2);
     const countResult = await transactionDB.rawQueryRow<{ count: number }>(countQuery, ...countParams);
-    
-    // Parse logs JSON
-    const processedTransactions = transactions.map(tx => ({
-      ...tx,
-      logs: tx.logs ? JSON.parse(tx.logs as string) : []
-    }));
-    
+
     return {
-      transactions: processedTransactions,
+      transactions: transactions.map(parseTransactionRow),
       total: countResult?.count || 0
     };
   }
@@ -152,40 +115,18 @@ export const listTransactions = api<{
 export const getTransaction = api<{ hash: string }, Transaction>(
   { expose: true, method: "GET", path: "/transaction/:hash" },
   async ({ hash }) => {
-    const transaction = await transactionDB.queryRow<Transaction>`
-      SELECT 
-        id,
-        hash,
-        network_id as "networkId",
-        from_address as "fromAddress",
-        to_address as "toAddress",
-        value::text,
-        gas_price::text as "gasPrice",
-        gas_limit as "gasLimit",
-        gas_used as "gasUsed",
-        nonce,
-        block_number as "blockNumber",
-        block_hash as "blockHash",
-        transaction_index as "transactionIndex",
-        status,
-        transaction_type as "transactionType",
-        contract_address as "contractAddress",
-        logs::text,
-        error_message as "errorMessage",
-        created_at as "createdAt",
-        confirmed_at as "confirmedAt"
+    const query = `
+      SELECT ${TRANSACTION_SELECT_FIELDS}
       FROM transactions 
-      WHERE hash = ${hash}
+      WHERE hash = $1
     `;
-    
+    const transaction = await transactionDB.rawQueryRow<Transaction>(query, hash);
+
     if (!transaction) {
       throw new Error("Transaction not found");
     }
-    
-    return {
-      ...transaction,
-      logs: transaction.logs ? JSON.parse(transaction.logs as string) : []
-    };
+
+    return parseTransactionRow(transaction);
   }
 );
 
@@ -193,58 +134,30 @@ export const getTransaction = api<{ hash: string }, Transaction>(
 export const createTransaction = api<CreateTransactionRequest, Transaction>(
   { expose: true, method: "POST", path: "/transaction/transactions" },
   async (req) => {
-    const transaction = await transactionDB.queryRow<Transaction>`
+    const query = `
       INSERT INTO transactions (
-        hash,
-        network_id,
-        from_address,
-        to_address,
-        value,
-        gas_price,
-        gas_limit,
-        nonce,
-        transaction_type,
-        contract_address
+        hash, network_id, from_address, to_address, value, gas_price, gas_limit, nonce, transaction_type, contract_address
       )
       VALUES (
-        ${req.hash},
-        ${req.networkId},
-        ${req.fromAddress},
-        ${req.toAddress || null},
-        ${req.value},
-        ${req.gasPrice || null},
-        ${req.gasLimit || null},
-        ${req.nonce || null},
-        ${req.transactionType},
-        ${req.contractAddress || null}
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
       )
-      RETURNING 
-        id,
-        hash,
-        network_id as "networkId",
-        from_address as "fromAddress",
-        to_address as "toAddress",
-        value::text,
-        gas_price::text as "gasPrice",
-        gas_limit as "gasLimit",
-        gas_used as "gasUsed",
-        nonce,
-        block_number as "blockNumber",
-        block_hash as "blockHash",
-        transaction_index as "transactionIndex",
-        status,
-        transaction_type as "transactionType",
-        contract_address as "contractAddress",
-        logs::text,
-        error_message as "errorMessage",
-        created_at as "createdAt",
-        confirmed_at as "confirmedAt"
+      RETURNING ${TRANSACTION_SELECT_FIELDS}
     `;
-    
-    return {
-      ...transaction!,
-      logs: []
-    };
+    const params = [
+      req.hash,
+      req.networkId,
+      req.fromAddress,
+      req.toAddress || null,
+      req.value,
+      req.gasPrice || null,
+      req.gasLimit || null,
+      req.nonce || null,
+      req.transactionType,
+      req.contractAddress || null,
+    ];
+    const transaction = await transactionDB.rawQueryRow<Transaction>(query, ...params);
+
+    return transaction ? parseTransactionRow(transaction) : null;
   }
 );
 
@@ -263,32 +176,26 @@ export const updateTransaction = api<UpdateTransactionRequest, Transaction>(
       setParts.push(`block_number = $${paramIndex++}`);
       params.push(req.blockNumber);
     }
-    
     if (req.blockHash !== undefined) {
       setParts.push(`block_hash = $${paramIndex++}`);
       params.push(req.blockHash);
     }
-    
     if (req.transactionIndex !== undefined) {
       setParts.push(`transaction_index = $${paramIndex++}`);
       params.push(req.transactionIndex);
     }
-    
     if (req.gasUsed !== undefined) {
       setParts.push(`gas_used = $${paramIndex++}`);
       params.push(req.gasUsed);
     }
-    
     if (req.logs !== undefined) {
       setParts.push(`logs = $${paramIndex++}`);
       params.push(JSON.stringify(req.logs));
     }
-    
     if (req.errorMessage !== undefined) {
       setParts.push(`error_message = $${paramIndex++}`);
       params.push(req.errorMessage);
     }
-
     if (req.status === 'confirmed') {
       setParts.push(`confirmed_at = NOW()`);
     }
@@ -297,40 +204,15 @@ export const updateTransaction = api<UpdateTransactionRequest, Transaction>(
       UPDATE transactions 
       SET ${setParts.join(', ')}
       WHERE hash = $${paramIndex}
-      RETURNING 
-        id,
-        hash,
-        network_id as "networkId",
-        from_address as "fromAddress",
-        to_address as "toAddress",
-        value::text,
-        gas_price::text as "gasPrice",
-        gas_limit as "gasLimit",
-        gas_used as "gasUsed",
-        nonce,
-        block_number as "blockNumber",
-        block_hash as "blockHash",
-        transaction_index as "transactionIndex",
-        status,
-        transaction_type as "transactionType",
-        contract_address as "contractAddress",
-        logs::text,
-        error_message as "errorMessage",
-        created_at as "createdAt",
-        confirmed_at as "confirmedAt"
+      RETURNING ${TRANSACTION_SELECT_FIELDS}
     `;
-    
     params.push(req.hash);
     const transaction = await transactionDB.rawQueryRow<Transaction>(query, ...params);
-    
+
     if (!transaction) {
       throw new Error("Transaction not found");
     }
-    
-    return {
-      ...transaction,
-      logs: transaction.logs ? JSON.parse(transaction.logs as string) : []
-    };
+    return parseTransactionRow(transaction);
   }
 );
 
@@ -340,7 +222,6 @@ export const getTransactionStats = api<{ networkId?: number }, TransactionStats>
   async (req) => {
     let whereClause = "";
     const params: any[] = [];
-    
     if (req.networkId) {
       whereClause = "WHERE network_id = $1";
       params.push(req.networkId);
@@ -356,7 +237,6 @@ export const getTransactionStats = api<{ networkId?: number }, TransactionStats>
       FROM transactions
       ${whereClause}
     `;
-    
     const stats = await transactionDB.rawQueryRow<{
       total_transactions: number;
       pending_transactions: number;
@@ -364,7 +244,7 @@ export const getTransactionStats = api<{ networkId?: number }, TransactionStats>
       failed_transactions: number;
       total_value: string;
     }>(statsQuery, ...params);
-    
+
     return {
       totalTransactions: stats?.total_transactions || 0,
       pendingTransactions: stats?.pending_transactions || 0,
@@ -383,51 +263,28 @@ export const getTransactionsByAddress = api<{
 }, ListTransactionsResponse>(
   { expose: true, method: "GET", path: "/transaction/address/:address" },
   async (req) => {
-    const page = req.page || 1;
-    const limit = req.limit || 50;
+    const page = req.page ?? DEFAULT_PAGE;
+    const limit = req.limit ?? DEFAULT_LIMIT;
     const offset = (page - 1) * limit;
-    
-    const transactions = await transactionDB.queryAll<Transaction>`
-      SELECT 
-        id,
-        hash,
-        network_id as "networkId",
-        from_address as "fromAddress",
-        to_address as "toAddress",
-        value::text,
-        gas_price::text as "gasPrice",
-        gas_limit as "gasLimit",
-        gas_used as "gasUsed",
-        nonce,
-        block_number as "blockNumber",
-        block_hash as "blockHash",
-        transaction_index as "transactionIndex",
-        status,
-        transaction_type as "transactionType",
-        contract_address as "contractAddress",
-        logs::text,
-        error_message as "errorMessage",
-        created_at as "createdAt",
-        confirmed_at as "confirmedAt"
+
+    const query = `
+      SELECT ${TRANSACTION_SELECT_FIELDS}
       FROM transactions 
-      WHERE from_address = ${req.address} OR to_address = ${req.address}
+      WHERE from_address = $1 OR to_address = $1
       ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
+      LIMIT $2 OFFSET $3
     `;
-    
-    const countResult = await transactionDB.queryRow<{ count: number }>`
+    const transactions = await transactionDB.rawQueryAll<Transaction>(query, req.address, limit, offset);
+
+    const countQuery = `
       SELECT COUNT(*) as count 
       FROM transactions 
-      WHERE from_address = ${req.address} OR to_address = ${req.address}
+      WHERE from_address = $1 OR to_address = $1
     `;
-    
-    const processedTransactions = transactions.map(tx => ({
-      ...tx,
-      logs: tx.logs ? JSON.parse(tx.logs as string) : []
-    }));
-    
+    const countResult = await transactionDB.rawQueryRow<{ count: number }>(countQuery, req.address);
+
     return {
-      transactions: processedTransactions,
+      transactions: transactions.map(parseTransactionRow),
       total: countResult?.count || 0
     };
   }
