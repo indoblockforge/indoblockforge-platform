@@ -18,7 +18,8 @@ export default function Transactions() {
     status: '',
   });
 
-  const { data: transactions, isLoading } = useQuery({
+  // Error Handling Added
+  const { data: transactions, isLoading, isError: isTxError, error: txError } = useQuery({
     queryKey: ['transactions', filters],
     queryFn: () => backend.transaction.listTransactions({
       page: filters.page,
@@ -29,12 +30,12 @@ export default function Transactions() {
     }),
   });
 
-  const { data: networks } = useQuery({
+  const { data: networks, isLoading: isNetworksLoading, isError: isNetworksError, error: networksError } = useQuery({
     queryKey: ['networks'],
     queryFn: () => backend.blockchain.listNetworks(),
   });
 
-  const { data: stats } = useQuery({
+  const { data: stats, isLoading: isStatsLoading, isError: isStatsError, error: statsError } = useQuery({
     queryKey: ['transaction-stats'],
     queryFn: () => backend.transaction.getTransactionStats({}),
   });
@@ -52,14 +53,14 @@ export default function Transactions() {
     }
   };
 
+  // Icon optimization: can be improved further if user address available
   const getTransactionIcon = (type: string, fromAddress: string, toAddress?: string) => {
     if (type === 'contract_deploy') return <Activity className="h-4 w-4 text-blue-500" />;
-    // In a real app, you'd check if the current user's address matches from/to
     return <ArrowUpRight className="h-4 w-4 text-gray-500" />;
   };
 
   const formatValue = (value: string) => {
-    const ethValue = parseFloat(value) / Math.pow(10, 18);
+    const ethValue = parseFloat(value || "0") / Math.pow(10, 18);
     return ethValue.toFixed(6);
   };
 
@@ -67,7 +68,17 @@ export default function Transactions() {
     setFilters(prev => ({ ...prev, page: 1 }));
   };
 
-  if (isLoading) {
+  // Error UI
+  if (isTxError) {
+    return <div className="text-red-500">Error loading transactions: {txError?.message || 'Unknown error.'}</div>;
+  }
+  if (isNetworksError) {
+    return <div className="text-red-500">Error loading networks: {networksError?.message || 'Unknown error.'}</div>;
+  }
+  if (isStatsError) {
+    return <div className="text-red-500">Error loading stats: {statsError?.message || 'Unknown error.'}</div>;
+  }
+  if (isLoading || isNetworksLoading || isStatsLoading) {
     return <div>Loading transactions...</div>;
   }
 
@@ -147,13 +158,14 @@ export default function Transactions() {
               <Select 
                 value={filters.networkId} 
                 onValueChange={(value) => setFilters(prev => ({ ...prev, networkId: value }))}
+                disabled={isNetworksLoading}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="All networks" />
+                  <SelectValue placeholder={isNetworksLoading ? "Loading..." : "All networks"} />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="">All Networks</SelectItem>
-                  {networks?.networks.map((network) => (
+                  {networks?.networks?.map((network) => (
                     <SelectItem key={network.id} value={network.id.toString()}>
                       {network.name}
                     </SelectItem>
@@ -240,7 +252,7 @@ export default function Transactions() {
                 
                 <div className="text-right space-y-1">
                   <div className="font-semibold">
-                    {formatValue(tx.value)} ETH
+                    {formatValue(tx.value || "0")} ETH
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {new Date(tx.createdAt).toLocaleDateString()} {new Date(tx.createdAt).toLocaleTimeString()}
