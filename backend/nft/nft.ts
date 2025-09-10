@@ -68,6 +68,18 @@ export interface ListMarketplaceResponse {
   listings: MarketplaceListing[];
 }
 
+// Helper function: parse attributes JSON safely
+function parseAttributes(attr: unknown): any[] {
+  if (typeof attr === "string" && attr.trim()) {
+    try {
+      return JSON.parse(attr);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(attr) ? attr : [];
+}
+
 // List all NFTs
 export const listNFTs = api<void, ListNFTsResponse>(
   { expose: true, method: "GET", path: "/nft/nfts" },
@@ -89,14 +101,12 @@ export const listNFTs = api<void, ListNFTsResponse>(
       FROM nft_metadata
       ORDER BY created_at DESC
     `;
-    
-    // Parse attributes JSON
-    const processedNfts = nfts.map(nft => ({
-      ...nft,
-      attributes: nft.attributes ? JSON.parse(nft.attributes as string) : []
-    }));
-    
-    return { nfts: processedNfts };
+    return {
+      nfts: nfts.map(nft => ({
+        ...nft,
+        attributes: parseAttributes(nft.attributes)
+      }))
+    };
   }
 );
 
@@ -122,13 +132,12 @@ export const getNFTsByOwner = api<{ ownerAddress: string }, ListNFTsResponse>(
       WHERE owner_address = ${ownerAddress}
       ORDER BY created_at DESC
     `;
-    
-    const processedNfts = nfts.map(nft => ({
-      ...nft,
-      attributes: nft.attributes ? JSON.parse(nft.attributes as string) : []
-    }));
-    
-    return { nfts: processedNfts };
+    return {
+      nfts: nfts.map(nft => ({
+        ...nft,
+        attributes: parseAttributes(nft.attributes)
+      }))
+    };
   }
 );
 
@@ -153,14 +162,12 @@ export const getNFT = api<{ id: number }, NFTMetadata>(
       FROM nft_metadata
       WHERE id = ${id}
     `;
-    
     if (!nft) {
       throw new Error("NFT not found");
     }
-    
     return {
       ...nft,
-      attributes: nft.attributes ? JSON.parse(nft.attributes as string) : []
+      attributes: parseAttributes(nft.attributes)
     };
   }
 );
@@ -169,6 +176,10 @@ export const getNFT = api<{ id: number }, NFTMetadata>(
 export const createNFT = api<CreateNFTRequest, NFTMetadata>(
   { expose: true, method: "POST", path: "/nft/nfts" },
   async (req) => {
+    // Simple validation
+    if (!req.tokenId || !req.tokenNumber || !req.ownerAddress) {
+      throw new Error("tokenId, tokenNumber, and ownerAddress are required");
+    }
     const nft = await nftDB.queryRow<NFTMetadata>`
       INSERT INTO nft_metadata (
         token_id,
@@ -190,7 +201,7 @@ export const createNFT = api<CreateNFTRequest, NFTMetadata>(
         ${req.animationUrl || null},
         ${req.externalUrl || null},
         ${req.attributes ? JSON.stringify(req.attributes) : null},
-        ${req.ownerAddress || null}
+        ${req.ownerAddress}
       )
       RETURNING 
         id,
@@ -206,10 +217,9 @@ export const createNFT = api<CreateNFTRequest, NFTMetadata>(
         created_at as "createdAt",
         updated_at as "updatedAt"
     `;
-    
     return {
       ...nft!,
-      attributes: nft!.attributes ? JSON.parse(nft!.attributes as string) : []
+      attributes: parseAttributes(nft!.attributes)
     };
   }
 );
@@ -238,7 +248,6 @@ export const listMarketplace = api<void, ListMarketplaceResponse>(
       WHERE ml.status = 'active'
       ORDER BY ml.created_at DESC
     `;
-    
     return { listings };
   }
 );
@@ -247,21 +256,22 @@ export const listMarketplace = api<void, ListMarketplaceResponse>(
 export const createListing = api<CreateListingRequest, MarketplaceListing>(
   { expose: true, method: "POST", path: "/nft/marketplace/list" },
   async (req) => {
+    // Validate required fields
+    if (!req.tokenId || !req.tokenNumber || !req.sellerAddress || !req.price) {
+      throw new Error("tokenId, tokenNumber, sellerAddress, and price are required");
+    }
     // Verify NFT ownership
-    const nft = await nftDB.queryRow`
+    const nft = await nftDB.queryRow<{ owner_address: string }>`
       SELECT owner_address 
       FROM nft_metadata 
       WHERE token_id = ${req.tokenId} AND token_number = ${req.tokenNumber}
     `;
-    
     if (!nft) {
       throw new Error("NFT not found");
     }
-    
     if (nft.owner_address !== req.sellerAddress) {
       throw new Error("You don't own this NFT");
     }
-
     const listing = await nftDB.queryRow<MarketplaceListing>`
       INSERT INTO marketplace_listings (
         token_id,
@@ -292,7 +302,6 @@ export const createListing = api<CreateListingRequest, MarketplaceListing>(
         sold_at as "soldAt",
         buyer_address as "buyerAddress"
     `;
-    
     return listing!;
   }
 );
@@ -301,24 +310,24 @@ export const createListing = api<CreateListingRequest, MarketplaceListing>(
 export const buyNFT = api<BuyNFTRequest, { success: boolean; message: string; transactionHash?: string }>(
   { expose: true, method: "POST", path: "/nft/marketplace/buy" },
   async (req) => {
+    // Validate request
+    if (!req.listingId || !req.buyerAddress) {
+      throw new Error("listingId and buyerAddress are required");
+    }
     // Get listing details
-    const listing = await nftDB.queryRow`
+    const listing = await nftDB.queryRow<any>`
       SELECT * FROM marketplace_listings 
       WHERE id = ${req.listingId} AND status = 'active'
     `;
-    
     if (!listing) {
       throw new Error("Listing not found or no longer active");
     }
-
     // Check if listing has expired
     if (listing.expires_at && new Date() > listing.expires_at) {
       throw new Error("Listing has expired");
     }
-
     // Start transaction
     await nftDB.exec`BEGIN`;
-    
     try {
       // Update listing status
       await nftDB.exec`
@@ -326,18 +335,15 @@ export const buyNFT = api<BuyNFTRequest, { success: boolean; message: string; tr
         SET status = 'sold', sold_at = NOW(), buyer_address = ${req.buyerAddress}
         WHERE id = ${req.listingId}
       `;
-
       // Transfer NFT ownership
       await nftDB.exec`
         UPDATE nft_metadata 
         SET owner_address = ${req.buyerAddress}, updated_at = NOW()
         WHERE token_id = ${listing.token_id} AND token_number = ${listing.token_number}
       `;
-
       await nftDB.exec`COMMIT`;
-
-      const mockTxHash = '0x' + Math.random().toString(16).substr(2, 64);
-
+      // Generate mock transaction hash
+      const mockTxHash = '0x' + Math.random().toString(16).padStart(64, '0').slice(0, 64);
       return {
         success: true,
         message: "NFT purchased successfully",
@@ -354,7 +360,10 @@ export const buyNFT = api<BuyNFTRequest, { success: boolean; message: string; tr
 export const cancelListing = api<{ listingId: number; sellerAddress: string }, { success: boolean; message: string }>(
   { expose: true, method: "POST", path: "/nft/marketplace/cancel" },
   async (req) => {
-    const result = await nftDB.queryRow`
+    if (!req.listingId || !req.sellerAddress) {
+      throw new Error("listingId and sellerAddress are required");
+    }
+    const result = await nftDB.queryRow<{ id: number }>`
       UPDATE marketplace_listings 
       SET status = 'cancelled'
       WHERE id = ${req.listingId} 
@@ -362,11 +371,9 @@ export const cancelListing = api<{ listingId: number; sellerAddress: string }, {
         AND status = 'active'
       RETURNING id
     `;
-    
     if (!result) {
       throw new Error("Listing not found or you're not the seller");
     }
-
     return {
       success: true,
       message: "Listing cancelled successfully"
