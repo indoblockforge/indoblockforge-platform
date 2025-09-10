@@ -3,6 +3,7 @@ import { SQLDatabase } from "encore.dev/storage/sqldb";
 
 const analyticsDB = SQLDatabase.named("blockchain");
 
+// Types
 export interface BlockchainOverview {
   totalNetworks: number;
   totalContracts: number;
@@ -61,87 +62,92 @@ export interface TopHoldersResponse {
   holders: TopHolders[];
 }
 
-// Get blockchain overview dashboard
+// Helper: percentage calculation for token holders
+function calculateHolderPercentage(balance: string, totalSupply: bigint): number {
+  if (totalSupply === BigInt(0)) return 0;
+  // Use 4 decimals for percentage precision
+  return Number((BigInt(balance) * BigInt(10000) / totalSupply)) / 100;
+}
+
+// API: Blockchain overview dashboard
 export const getOverview = api<void, BlockchainOverview>(
   { expose: true, method: "GET", path: "/analytics/overview" },
   async () => {
     const overview = await analyticsDB.queryRow<BlockchainOverview>`
       SELECT 
-        (SELECT COUNT(*) FROM networks WHERE is_active = true) as "totalNetworks",
-        (SELECT COUNT(*) FROM smart_contracts) as "totalContracts",
-        (SELECT COUNT(*) FROM wallets) as "totalWallets",
-        (SELECT COUNT(*) FROM tokens) as "totalTokens",
-        (SELECT COUNT(*) FROM nft_metadata) as "totalNFTs",
-        (SELECT COUNT(*) FROM transactions) as "totalTransactions",
-        (SELECT COUNT(*) FROM transactions WHERE status = 'pending') as "pendingTransactions"
+        (SELECT COUNT(*) FROM networks WHERE is_active = true) AS "totalNetworks",
+        (SELECT COUNT(*) FROM smart_contracts) AS "totalContracts",
+        (SELECT COUNT(*) FROM wallets) AS "totalWallets",
+        (SELECT COUNT(*) FROM tokens) AS "totalTokens",
+        (SELECT COUNT(*) FROM nft_metadata) AS "totalNFTs",
+        (SELECT COUNT(*) FROM transactions) AS "totalTransactions",
+        (SELECT COUNT(*) FROM transactions WHERE status = 'pending') AS "pendingTransactions"
     `;
-    
     return overview!;
   }
 );
 
-// Get network activity statistics
+// API: Network activity statistics
 export const getNetworkActivity = api<void, NetworkActivityResponse>(
   { expose: true, method: "GET", path: "/analytics/networks" },
   async () => {
     const activities = await analyticsDB.queryAll<NetworkActivity>`
       SELECT 
-        n.id as "networkId",
-        n.name as "networkName",
-        COALESCE(tx_stats.transaction_count, 0) as "transactionCount",
-        COALESCE(contract_stats.contract_count, 0) as "contractCount",
-        COALESCE(tx_stats.total_value, '0') as "totalValue",
-        COALESCE(tx_stats.last_activity, n.created_at) as "lastActivity"
+        n.id AS "networkId",
+        n.name AS "networkName",
+        COALESCE(tx_stats.transaction_count, 0) AS "transactionCount",
+        COALESCE(contract_stats.contract_count, 0) AS "contractCount",
+        COALESCE(tx_stats.total_value, '0') AS "totalValue",
+        COALESCE(tx_stats.last_activity, n.created_at) AS "lastActivity"
       FROM networks n
       LEFT JOIN (
         SELECT 
           network_id,
-          COUNT(*) as transaction_count,
-          SUM(value)::text as total_value,
-          MAX(created_at) as last_activity
+          COUNT(*) AS transaction_count,
+          SUM(value)::text AS total_value,
+          MAX(created_at) AS last_activity
         FROM transactions
         GROUP BY network_id
       ) tx_stats ON n.id = tx_stats.network_id
       LEFT JOIN (
         SELECT 
           network_id,
-          COUNT(*) as contract_count
+          COUNT(*) AS contract_count
         FROM smart_contracts
         GROUP BY network_id
       ) contract_stats ON n.id = contract_stats.network_id
       WHERE n.is_active = true
       ORDER BY "transactionCount" DESC
     `;
-    
     return { activities };
   }
 );
 
-// Get token analytics
+// API: Token analytics (top 20 tokens by holder count)
 export const getTokenAnalytics = api<void, TokenAnalyticsResponse>(
   { expose: true, method: "GET", path: "/analytics/tokens" },
   async () => {
     const analytics = await analyticsDB.queryAll<TokenAnalytics>`
       SELECT 
-        t.id as "tokenId",
-        t.symbol as "tokenSymbol",
-        t.name as "tokenName",
-        COALESCE(holder_stats.holder_count, 0) as "holderCount",
-        COALESCE(t.total_supply, '0')::text as "totalSupply",
-        COALESCE(tx_stats.transaction_count, 0) as "transactionCount"
+        t.id AS "tokenId",
+        t.symbol AS "tokenSymbol",
+        t.name AS "tokenName",
+        COALESCE(holder_stats.holder_count, 0) AS "holderCount",
+        COALESCE(t.total_supply, '0')::text AS "totalSupply",
+        COALESCE(tx_stats.transaction_count, 0) AS "transactionCount"
       FROM tokens t
       LEFT JOIN (
         SELECT 
           token_id,
-          COUNT(*) as holder_count
+          COUNT(*) AS holder_count
         FROM token_balances
         WHERE balance > 0
         GROUP BY token_id
       ) holder_stats ON t.id = holder_stats.token_id
       LEFT JOIN (
         SELECT 
-          sc.id as contract_id,
-          COUNT(tx.id) as transaction_count
+          sc.id AS contract_id,
+          COUNT(tx.id) AS transaction_count
         FROM smart_contracts sc
         LEFT JOIN transactions tx ON sc.address = tx.contract_address
         GROUP BY sc.id
@@ -149,78 +155,71 @@ export const getTokenAnalytics = api<void, TokenAnalyticsResponse>(
       ORDER BY "holderCount" DESC
       LIMIT 20
     `;
-    
     return { analytics };
   }
 );
 
-// Get daily statistics for the last 30 days
+// API: Daily statistics for last N days (default 30)
 export const getDailyStats = api<{ days?: number }, DailyStatsResponse>(
   { expose: true, method: "GET", path: "/analytics/daily" },
   async (req) => {
-    const days = req.days || 30;
-    
+    const days = req.days && req.days > 0 ? req.days : 30;
     const stats = await analyticsDB.queryAll<DailyStats>`
       WITH date_series AS (
         SELECT generate_series(
           CURRENT_DATE - INTERVAL '${days - 1} days',
           CURRENT_DATE,
           '1 day'::interval
-        )::date as date
+        )::date AS date
       ),
       daily_transactions AS (
         SELECT 
-          DATE(created_at) as date,
-          COUNT(*) as transaction_count,
-          COUNT(DISTINCT from_address) + COUNT(DISTINCT to_address) as unique_users,
-          SUM(value)::text as total_value
+          DATE(created_at) AS date,
+          COUNT(*) AS transaction_count,
+          COUNT(DISTINCT from_address) + COUNT(DISTINCT to_address) AS unique_users,
+          SUM(value)::text AS total_value
         FROM transactions
         WHERE created_at >= CURRENT_DATE - INTERVAL '${days} days'
         GROUP BY DATE(created_at)
       ),
       daily_wallets AS (
         SELECT 
-          DATE(created_at) as date,
-          COUNT(*) as new_wallets
+          DATE(created_at) AS date,
+          COUNT(*) AS new_wallets
         FROM wallets
         WHERE created_at >= CURRENT_DATE - INTERVAL '${days} days'
         GROUP BY DATE(created_at)
       )
       SELECT 
         ds.date::text,
-        COALESCE(dt.transaction_count, 0) as "transactionCount",
-        COALESCE(dt.unique_users, 0) as "uniqueUsers",
-        COALESCE(dt.total_value, '0') as "totalValue",
-        COALESCE(dw.new_wallets, 0) as "newWallets"
+        COALESCE(dt.transaction_count, 0) AS "transactionCount",
+        COALESCE(dt.unique_users, 0) AS "uniqueUsers",
+        COALESCE(dt.total_value, '0') AS "totalValue",
+        COALESCE(dw.new_wallets, 0) AS "newWallets"
       FROM date_series ds
       LEFT JOIN daily_transactions dt ON ds.date = dt.date
       LEFT JOIN daily_wallets dw ON ds.date = dw.date
       ORDER BY ds.date
     `;
-    
     return { stats };
   }
 );
 
-// Get top token holders for a specific token
+// API: Top token holders for specific token
 export const getTopHolders = api<{ tokenId: number; limit?: number }, TopHoldersResponse>(
   { expose: true, method: "GET", path: "/analytics/tokens/:tokenId/holders" },
   async (req) => {
-    const limit = req.limit || 10;
-    
-    // First get total supply for percentage calculation
+    const limit = req.limit && req.limit > 0 ? req.limit : 10;
+
+    // Get total supply for percentage calculation
     const token = await analyticsDB.queryRow<{ totalSupply: string }>`
-      SELECT COALESCE(total_supply, '0')::text as "totalSupply"
+      SELECT COALESCE(total_supply, '0')::text AS "totalSupply"
       FROM tokens
       WHERE id = ${req.tokenId}
     `;
-    
-    if (!token) {
-      throw new Error("Token not found");
-    }
-    
+    if (!token) throw new Error("Token not found");
     const totalSupply = BigInt(token.totalSupply);
-    
+
     const holders = await analyticsDB.queryAll<{ address: string; balance: string }>`
       SELECT 
         w.address,
@@ -231,25 +230,28 @@ export const getTopHolders = api<{ tokenId: number; limit?: number }, TopHolders
       ORDER BY tb.balance DESC
       LIMIT ${limit}
     `;
-    
-    const processedHolders: TopHolders[] = holders.map(holder => ({
-      address: holder.address,
-      balance: holder.balance,
-      percentage: totalSupply > 0 ? Number((BigInt(holder.balance) * BigInt(10000) / totalSupply)) / 100 : 0
+
+    const processedHolders: TopHolders[] = holders.map(({ address, balance }) => ({
+      address,
+      balance,
+      percentage: calculateHolderPercentage(balance, totalSupply),
     }));
-    
+
     return { holders: processedHolders };
   }
 );
 
-// Get blockchain health metrics
-export const getHealthMetrics = api<void, {
-  avgBlockTime: number;
-  networkStatus: string;
-  lastBlockHeight: number;
-  totalGasUsed: string;
-  avgGasPrice: string;
-}>(
+// API: Blockchain health metrics
+export const getHealthMetrics = api<
+  void,
+  {
+    avgBlockTime: number;
+    networkStatus: string;
+    lastBlockHeight: number;
+    totalGasUsed: string;
+    avgGasPrice: string;
+  }
+>(
   { expose: true, method: "GET", path: "/analytics/health" },
   async () => {
     const metrics = await analyticsDB.queryRow<{
@@ -260,21 +262,20 @@ export const getHealthMetrics = api<void, {
       avgGasPrice: string;
     }>`
       SELECT 
-        COALESCE(AVG(EXTRACT(EPOCH FROM (confirmed_at - created_at))), 0) as "avgBlockTime",
+        COALESCE(AVG(EXTRACT(EPOCH FROM (confirmed_at - created_at))), 0) AS "avgBlockTime",
         CASE 
           WHEN COUNT(CASE WHEN status = 'failed' THEN 1 END) > COUNT(*) * 0.1 
           THEN 'degraded'
           WHEN COUNT(CASE WHEN status = 'pending' THEN 1 END) > 100
           THEN 'congested'
           ELSE 'healthy'
-        END as "networkStatus",
-        COALESCE(MAX(block_number), 0) as "lastBlockHeight",
-        COALESCE(SUM(gas_used), 0)::text as "totalGasUsed",
-        COALESCE(AVG(gas_price), 0)::text as "avgGasPrice"
+        END AS "networkStatus",
+        COALESCE(MAX(block_number), 0) AS "lastBlockHeight",
+        COALESCE(SUM(gas_used), 0)::text AS "totalGasUsed",
+        COALESCE(AVG(gas_price), 0)::text AS "avgGasPrice"
       FROM transactions
       WHERE created_at >= NOW() - INTERVAL '1 hour'
     `;
-    
     return metrics!;
   }
 );
