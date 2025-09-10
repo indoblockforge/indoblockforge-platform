@@ -1,8 +1,15 @@
 import { api } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 
+// Endpoint path constants
+const WALLET_PATH = "/wallet/wallets";
+const WALLET_BY_ADDRESS_PATH = "/wallet/:address";
+const WALLET_BALANCE_PATH = "/wallet/:address/balance";
+const WALLET_UPDATE_USAGE_PATH = "/wallet/:address/update-usage";
+
 const walletDB = SQLDatabase.named("blockchain");
 
+// Types
 export interface Wallet {
   id: number;
   address: string;
@@ -40,10 +47,22 @@ export interface ListWalletsResponse {
   wallets: Wallet[];
 }
 
+// Helper for ISO date conversion
+function toISODateFields<T extends { createdAt: Date, lastUsedAt: Date }>(obj: T): T & { createdAt: string, lastUsedAt: string } {
+  return {
+    ...obj,
+    createdAt: obj.createdAt?.toISOString(),
+    lastUsedAt: obj.lastUsedAt?.toISOString()
+  };
+}
+
 // List all wallets for a user
 export const listWallets = api<{ userId: string }, ListWalletsResponse>(
-  { expose: true, method: "GET", path: "/wallet/wallets" },
+  { expose: true, method: "GET", path: WALLET_PATH },
   async ({ userId }) => {
+    if (!userId) {
+      throw api.error("Missing userId", 400);
+    }
     const wallets = await walletDB.queryAll<Wallet>`
       SELECT 
         id,
@@ -58,15 +77,18 @@ export const listWallets = api<{ userId: string }, ListWalletsResponse>(
       WHERE user_id = ${userId}
       ORDER BY created_at DESC
     `;
-    
-    return { wallets };
+    // Format date fields
+    return { wallets: wallets.map(toISODateFields) };
   }
 );
 
 // Get a specific wallet by address
 export const getWallet = api<{ address: string }, Wallet>(
-  { expose: true, method: "GET", path: "/wallet/:address" },
+  { expose: true, method: "GET", path: WALLET_BY_ADDRESS_PATH },
   async ({ address }) => {
+    if (!address) {
+      throw api.error("Missing wallet address", 400);
+    }
     const wallet = await walletDB.queryRow<Wallet>`
       SELECT 
         id,
@@ -80,19 +102,25 @@ export const getWallet = api<{ address: string }, Wallet>(
       FROM wallets 
       WHERE address = ${address}
     `;
-    
     if (!wallet) {
-      throw new Error("Wallet not found");
+      throw api.error("Wallet not found", 404);
     }
-    
-    return wallet;
+    return toISODateFields(wallet);
   }
 );
 
 // Create a new wallet
 export const createWallet = api<CreateWalletRequest, Wallet>(
-  { expose: true, method: "POST", path: "/wallet/wallets" },
+  { expose: true, method: "POST", path: WALLET_PATH },
   async (req) => {
+    // Validate required fields
+    if (!req.address || !req.userId) {
+      throw api.error("Missing required fields: address or userId", 400);
+    }
+    // Validate optional: encryptedPrivateKey should be encrypted before arrival
+    if (req.encryptedPrivateKey && req.encryptedPrivateKey.length < 32) {
+      throw api.error("Encrypted private key is too short or not securely encrypted", 400);
+    }
     const wallet = await walletDB.queryRow<Wallet>`
       INSERT INTO wallets (
         address, 
@@ -106,7 +134,7 @@ export const createWallet = api<CreateWalletRequest, Wallet>(
         ${req.address}, 
         ${req.userId}, 
         ${req.walletType || 'EOA'}, 
-        ${req.isCustodial || false}, 
+        ${req.isCustodial ?? false}, 
         ${req.encryptedPrivateKey || null}, 
         ${req.publicKey || null}
       )
@@ -120,15 +148,20 @@ export const createWallet = api<CreateWalletRequest, Wallet>(
         created_at as "createdAt",
         last_used_at as "lastUsedAt"
     `;
-    
-    return wallet!;
+    if (!wallet) {
+      throw api.error("Failed to create wallet", 500);
+    }
+    return toISODateFields(wallet);
   }
 );
 
 // Get wallet balances (tokens)
 export const getWalletBalance = api<{ address: string }, WalletBalanceResponse>(
-  { expose: true, method: "GET", path: "/wallet/:address/balance" },
+  { expose: true, method: "GET", path: WALLET_BALANCE_PATH },
   async ({ address }) => {
+    if (!address) {
+      throw api.error("Missing wallet address", 400);
+    }
     const balances = await walletDB.queryAll<WalletBalanceItem>`
       SELECT 
         t.symbol as "tokenSymbol",
@@ -144,7 +177,6 @@ export const getWalletBalance = api<{ address: string }, WalletBalanceResponse>(
         AND tb.balance > 0
       ORDER BY t.symbol
     `;
-    
     return {
       address,
       balances
@@ -154,8 +186,11 @@ export const getWalletBalance = api<{ address: string }, WalletBalanceResponse>(
 
 // Update wallet last used timestamp
 export const updateWalletLastUsed = api<{ address: string }, void>(
-  { expose: true, method: "PATCH", path: "/wallet/:address/update-usage" },
+  { expose: true, method: "PATCH", path: WALLET_UPDATE_USAGE_PATH },
   async ({ address }) => {
+    if (!address) {
+      throw api.error("Missing wallet address", 400);
+    }
     await walletDB.exec`
       UPDATE wallets 
       SET last_used_at = NOW() 
