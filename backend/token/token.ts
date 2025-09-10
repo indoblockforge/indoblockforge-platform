@@ -62,6 +62,11 @@ export interface TokenOperation {
   message: string;
 }
 
+// Helper to generate mock tx hash
+function generateMockTxHash(): string {
+  return '0x' + Math.random().toString(16).substr(2, 64);
+}
+
 // List all tokens
 export const listTokens = api<void, ListTokensResponse>(
   { expose: true, method: "GET", path: "/token/tokens" },
@@ -86,7 +91,6 @@ export const listTokens = api<void, ListTokensResponse>(
       JOIN smart_contracts sc ON t.contract_id = sc.id
       ORDER BY t.created_at DESC
     `;
-    
     return { tokens };
   }
 );
@@ -115,11 +119,7 @@ export const getToken = api<{ id: number }, Token>(
       JOIN smart_contracts sc ON t.contract_id = sc.id
       WHERE t.id = ${id}
     `;
-    
-    if (!token) {
-      throw new Error("Token not found");
-    }
-    
+    if (!token) throw new Error("Token not found");
     return token;
   }
 );
@@ -128,6 +128,18 @@ export const getToken = api<{ id: number }, Token>(
 export const createToken = api<CreateTokenRequest, Token>(
   { expose: true, method: "POST", path: "/token/tokens" },
   async (req) => {
+    // Validate required fields
+    if (!req.contractId || !req.symbol || !req.name || !req.tokenType) {
+      throw new Error("Missing required token fields");
+    }
+
+    const decimals = req.decimals ?? 18;
+    const totalSupply = req.totalSupply ?? null;
+    const maxSupply = req.maxSupply ?? null;
+    const metadataUri = req.metadataUri ?? null;
+    const isMintable = req.isMintable ?? true;
+    const isBurnable = req.isBurnable ?? true;
+
     const token = await tokenDB.queryRow<Token>`
       INSERT INTO tokens (
         contract_id,
@@ -145,13 +157,13 @@ export const createToken = api<CreateTokenRequest, Token>(
         ${req.contractId},
         ${req.symbol},
         ${req.name},
-        ${req.decimals || 18},
-        ${req.totalSupply || null},
-        ${req.maxSupply || null},
+        ${decimals},
+        ${totalSupply},
+        ${maxSupply},
         ${req.tokenType},
-        ${req.metadataUri || null},
-        ${req.isMintable || true},
-        ${req.isBurnable || true}
+        ${metadataUri},
+        ${isMintable},
+        ${isBurnable}
       )
       RETURNING 
         id,
@@ -167,7 +179,6 @@ export const createToken = api<CreateTokenRequest, Token>(
         is_burnable as "isBurnable",
         created_at as "createdAt"
     `;
-    
     return token!;
   }
 );
@@ -176,32 +187,22 @@ export const createToken = api<CreateTokenRequest, Token>(
 export const mintToken = api<MintTokenRequest, TokenOperation>(
   { expose: true, method: "POST", path: "/token/mint" },
   async (req) => {
-    // In a real implementation, this would:
-    // 1. Validate the token exists and is mintable
-    // 2. Call the smart contract mint function
-    // 3. Wait for transaction confirmation
-    // 4. Update the database with new balance
-    
-    // For now, we'll simulate by updating the token balance
-    const token = await tokenDB.queryRow`
-      SELECT id, is_mintable FROM tokens WHERE id = ${req.tokenId}
-    `;
-    
-    if (!token) {
-      throw new Error("Token not found");
-    }
-    
-    if (!token.is_mintable) {
-      throw new Error("Token is not mintable");
+    if (!req.tokenId || !req.toAddress || !req.amount) {
+      throw new Error("Missing required mint parameters");
     }
 
+    const token = await tokenDB.queryRow<{ id: number; is_mintable: boolean }>`
+      SELECT id, is_mintable FROM tokens WHERE id = ${req.tokenId}
+    `;
+    if (!token) throw new Error("Token not found");
+    if (!token.is_mintable) throw new Error("Token is not mintable");
+
     // Get or create wallet
-    let wallet = await tokenDB.queryRow`
+    let wallet = await tokenDB.queryRow<{ id: number }>`
       SELECT id FROM wallets WHERE address = ${req.toAddress}
     `;
-    
     if (!wallet) {
-      wallet = await tokenDB.queryRow`
+      wallet = await tokenDB.queryRow<{ id: number }>`
         INSERT INTO wallets (address, user_id, wallet_type)
         VALUES (${req.toAddress}, 'system', 'EOA')
         RETURNING id
@@ -216,12 +217,9 @@ export const mintToken = api<MintTokenRequest, TokenOperation>(
       DO UPDATE SET balance = token_balances.balance + ${req.amount}, updated_at = NOW()
     `;
 
-    // In real implementation, this would be the actual transaction hash
-    const mockTxHash = '0x' + Math.random().toString(16).substr(2, 64);
-
     return {
       success: true,
-      transactionHash: mockTxHash,
+      transactionHash: generateMockTxHash(),
       message: `Successfully minted ${req.amount} tokens to ${req.toAddress}`
     };
   }
@@ -231,26 +229,23 @@ export const mintToken = api<MintTokenRequest, TokenOperation>(
 export const burnToken = api<BurnTokenRequest, TokenOperation>(
   { expose: true, method: "POST", path: "/token/burn" },
   async (req) => {
-    const token = await tokenDB.queryRow`
-      SELECT id, is_burnable FROM tokens WHERE id = ${req.tokenId}
-    `;
-    
-    if (!token) {
-      throw new Error("Token not found");
-    }
-    
-    if (!token.is_burnable) {
-      throw new Error("Token is not burnable");
+    if (!req.tokenId || !req.fromAddress || !req.amount) {
+      throw new Error("Missing required burn parameters");
     }
 
+    const token = await tokenDB.queryRow<{ id: number; is_burnable: boolean }>`
+      SELECT id, is_burnable FROM tokens WHERE id = ${req.tokenId}
+    `;
+    if (!token) throw new Error("Token not found");
+    if (!token.is_burnable) throw new Error("Token is not burnable");
+
     // Get wallet and check balance
-    const balance = await tokenDB.queryRow`
+    const balance = await tokenDB.queryRow<{ balance: string; wallet_id: number }>`
       SELECT tb.balance, w.id as wallet_id
       FROM token_balances tb
       JOIN wallets w ON tb.wallet_id = w.id
       WHERE w.address = ${req.fromAddress} AND tb.token_id = ${req.tokenId}
     `;
-    
     if (!balance || BigInt(balance.balance) < BigInt(req.amount)) {
       throw new Error("Insufficient balance to burn");
     }
@@ -262,11 +257,9 @@ export const burnToken = api<BurnTokenRequest, TokenOperation>(
       WHERE wallet_id = ${balance.wallet_id} AND token_id = ${req.tokenId}
     `;
 
-    const mockTxHash = '0x' + Math.random().toString(16).substr(2, 64);
-
     return {
       success: true,
-      transactionHash: mockTxHash,
+      transactionHash: generateMockTxHash(),
       message: `Successfully burned ${req.amount} tokens from ${req.fromAddress}`
     };
   }
@@ -276,34 +269,35 @@ export const burnToken = api<BurnTokenRequest, TokenOperation>(
 export const transferToken = api<TransferTokenRequest, TokenOperation>(
   { expose: true, method: "POST", path: "/token/transfer" },
   async (req) => {
+    if (!req.tokenId || !req.fromAddress || !req.toAddress || !req.amount) {
+      throw new Error("Missing required transfer parameters");
+    }
+
     // Get from wallet and check balance
-    const fromBalance = await tokenDB.queryRow`
+    const fromBalance = await tokenDB.queryRow<{ balance: string; wallet_id: number }>`
       SELECT tb.balance, w.id as wallet_id
       FROM token_balances tb
       JOIN wallets w ON tb.wallet_id = w.id
       WHERE w.address = ${req.fromAddress} AND tb.token_id = ${req.tokenId}
     `;
-    
     if (!fromBalance || BigInt(fromBalance.balance) < BigInt(req.amount)) {
       throw new Error("Insufficient balance to transfer");
     }
 
     // Get or create to wallet
-    let toWallet = await tokenDB.queryRow`
+    let toWallet = await tokenDB.queryRow<{ id: number }>`
       SELECT id FROM wallets WHERE address = ${req.toAddress}
     `;
-    
     if (!toWallet) {
-      toWallet = await tokenDB.queryRow`
+      toWallet = await tokenDB.queryRow<{ id: number }>`
         INSERT INTO wallets (address, user_id, wallet_type)
         VALUES (${req.toAddress}, 'system', 'EOA')
         RETURNING id
       `;
     }
 
-    // Start transaction
+    // Transaction block
     await tokenDB.exec`BEGIN`;
-    
     try {
       // Deduct from sender
       await tokenDB.exec`
@@ -322,11 +316,9 @@ export const transferToken = api<TransferTokenRequest, TokenOperation>(
 
       await tokenDB.exec`COMMIT`;
 
-      const mockTxHash = '0x' + Math.random().toString(16).substr(2, 64);
-
       return {
         success: true,
-        transactionHash: mockTxHash,
+        transactionHash: generateMockTxHash(),
         message: `Successfully transferred ${req.amount} tokens from ${req.fromAddress} to ${req.toAddress}`
       };
     } catch (error) {
